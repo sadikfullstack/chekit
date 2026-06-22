@@ -95,7 +95,7 @@ function Results({ result, onReset }) {
       <div className={`verdict-hero tone-${verdict.tone}`}>
         <div className="verdict-glow"/><div className="verdict-glyph">{verdict.glyph}</div>
         <span>THE QUICK READ</span><h1>{verdict.label}</h1><p>{result.summary}</p>
-        <div className="confidence-pill"><b>{result.confidence}%</b> confidence <span>·</span> checked live</div>
+        <div className="confidence-pill"><b>{result.confidence}%</b> evidence strength <span>·</span> checked live</div>
       </div>
       <div className="snapshot">
         <div><strong>{counts.TRUE || 0}</strong><span>Checks out</span></div>

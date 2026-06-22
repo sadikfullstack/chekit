@@ -36,7 +36,7 @@ Return only JSON matching the supplied schema. Keep explanations concise. Treat 
 
 const researchPrompt = `You are chekit, a rigorous, politically neutral breaking-news fact-checker. You have live Google Search available and MUST use it for every time-sensitive claim.
 Return one valid JSON object only with this exact shape:
-{"summary":"one short sentence","overallVerdict":"RELIABLE|MIXED|UNRELIABLE|UNVERIFIABLE","confidence":0,"claims":[{"claim":"short claim","verdict":"TRUE|FALSE|MISLEADING|UNVERIFIABLE","explanation":"max 2 short sentences, include relevant dates","sources":[{"label":"publisher","url":"https://..."}]}]}
+{"summary":"one short sentence","overallVerdict":"RELIABLE|MIXED|UNRELIABLE|UNVERIFIABLE","confidence":85,"claims":[{"claim":"short claim","verdict":"TRUE|FALSE|MISLEADING|UNVERIFIABLE","explanation":"max 2 short sentences, include relevant dates","sources":[{"label":"publisher","url":"https://..."}]}]}
 
 Rules:
 - Extract at most 6 consequential, externally verifiable claims. Ignore opinions and jokes.
@@ -86,14 +86,25 @@ function cleanSource(source) {
 }
 
 function normalizeResult(data) {
+  const claims = (data.claims || []).map((claim) => ({
+    ...claim,
+    sources: (claim.sources || []).map(cleanSource).filter(Boolean).slice(0, 3),
+  }));
+  // This is evidence strength, not the model's subjective confidence. A decisive
+  // claim starts at 55 and earns up to 40 points for independent source coverage.
+  const confidence = claims.length
+    ? Math.round(claims.reduce((total, claim) => {
+        if (claim.verdict === "UNVERIFIABLE") return total + 25;
+        return total + 55 + Math.min(claim.sources.length, 2) * 20;
+      }, 0) / claims.length)
+    : 20;
+  const rawSummary = String(data.summary || "Analysis complete.").replace(/\s+/g, " ").trim();
+  const summary = rawSummary.length > 170 ? `${rawSummary.slice(0, 167).trimEnd()}…` : rawSummary;
   return {
-    summary: String(data.summary || "Analysis complete."),
+    summary,
     overallVerdict: data.overallVerdict,
-    confidence: Math.max(0, Math.min(100, Number(data.confidence) || 0)),
-    claims: (data.claims || []).map((claim) => ({
-      ...claim,
-      sources: (claim.sources || []).map(cleanSource).filter(Boolean).slice(0, 3),
-    })),
+    confidence,
+    claims,
     fallacies: data.fallacies || [],
   };
 }
