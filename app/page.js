@@ -1,59 +1,117 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-const verdictCopy = {
-  RELIABLE: "Mostly reliable",
-  MIXED: "Mixed accuracy",
-  UNRELIABLE: "Low reliability",
-  UNVERIFIABLE: "Not verifiable",
+const verdicts = {
+  RELIABLE: { label: "Looks solid", tone: "good", glyph: "✓" },
+  MIXED: { label: "Mixed signals", tone: "warn", glyph: "~" },
+  UNRELIABLE: { label: "Handle with care", tone: "bad", glyph: "!" },
+  UNVERIFIABLE: { label: "Still unclear", tone: "neutral", glyph: "?" },
 };
+
+const loadingSteps = [
+  ["Listening closely", "Pulling out what was actually said"],
+  ["Finding the claims", "Separating facts from opinions"],
+  ["Checking the timeline", "Matching evidence to the right dates"],
+  ["Searching live sources", "Cross-checking current reporting"],
+  ["Reading between the lines", "Spotting persuasive tricks"],
+];
 
 function Icon({ name, size = 20 }) {
   const paths = {
-    shield: <path d="M12 3 5 6v5c0 4.6 2.9 8.4 7 10 4.1-1.6 7-5.4 7-10V6l-7-3Zm-3 9 2 2 4-4" />,
-    alert: <><path d="m12 3-9 17h18L12 3Z" /><path d="M12 9v4m0 3h.01" /></>,
-    link: <><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1" /><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1" /></>,
-    arrow: <path d="M5 12h14m-5-5 5 5-5 5" />,
-    check: <path d="m5 12 4 4L19 6" />,
+    link: <><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1"/></>,
+    arrow: <path d="M5 12h14m-5-5 5 5-5 5"/>,
+    close: <path d="m6 6 12 12M18 6 6 18"/>,
+    spark: <path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5L12 3Z"/>,
+    source: <><circle cx="12" cy="12" r="9"/><path d="M8 12h8m-4-4v8"/></>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
-function ClaimCard({ item, index }) {
+function LoadingScreen({ onCancel }) {
+  const [step, setStep] = useState(0);
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const ticker = setInterval(() => setSeconds((value) => value + 1), 1000);
+    const stages = setInterval(() => setStep((value) => Math.min(value + 1, loadingSteps.length - 1)), 4300);
+    return () => { clearInterval(ticker); clearInterval(stages); };
+  }, []);
+  const progress = Math.min(92, 10 + seconds * 2.4);
   return (
-    <article className={`result-card claim ${item.verdict.toLowerCase()}`}>
-      <div className="card-top">
-        <span className="card-number">{String(index + 1).padStart(2, "0")}</span>
-        <span className="verdict-badge">{item.verdict}</span>
+    <div className="loading-screen" role="status" aria-live="polite">
+      <button className="loading-close" onClick={onCancel} aria-label="Cancel scan"><Icon name="close"/></button>
+      <div className="loading-brand">chekit</div>
+      <div className="scan-orb" aria-hidden="true"><i/><i/><i/><span><Icon name="spark" size={28}/></span></div>
+      <div className="loading-copy" key={step}>
+        <span>STEP {step + 1} OF {loadingSteps.length}</span>
+        <h2>{loadingSteps[step][0]}</h2>
+        <p>{loadingSteps[step][1]}</p>
       </div>
-      <h3>{item.claim}</h3>
-      <p>{item.explanation}</p>
-      {item.sources?.length > 0 && (
-        <div className="sources">
-          <span>Sources</span>
-          {item.sources.map((source, sourceIndex) => (
-            <a href={source.url} target="_blank" rel="noopener noreferrer" key={`${source.url}-${sourceIndex}`}>
-              {source.label}<Icon name="arrow" size={14} />
-            </a>
-          ))}
-        </div>
-      )}
+      <div className="progress-wrap"><div className="progress-track"><span style={{ width: `${progress}%` }}/></div><small>{seconds < 8 ? "Warming up" : `${seconds}s · live analysis`}</small></div>
+      <p className="loading-tip">Good checks take a beat. We’re matching claims to the moment they were made.</p>
+    </div>
+  );
+}
+
+function ClaimCard({ item, index, open, onToggle }) {
+  return (
+    <article className={`swipe-card claim-card ${item.verdict.toLowerCase()} ${open ? "is-open" : ""}`}>
+      <button className="card-hit" onClick={onToggle} aria-expanded={open}>
+        <div className="card-status"><span>{item.verdict === "TRUE" ? "✓" : item.verdict === "FALSE" ? "×" : item.verdict === "MISLEADING" ? "~" : "?"}</span>{item.verdict}</div>
+        <small>CLAIM {index + 1}</small>
+        <h3>{item.claim}</h3>
+        <div className="peek"><span>{open ? "Hide detail" : "Why this verdict"}</span><b>{open ? "−" : "+"}</b></div>
+      </button>
+      {open && <div className="card-detail"><p>{item.explanation}</p>{item.sources?.length > 0 && <div className="source-list">{item.sources.map((source, i) => <a key={`${source.url}-${i}`} href={source.url} target="_blank" rel="noopener noreferrer"><Icon name="source" size={14}/><span>{source.label}</span><Icon name="arrow" size={13}/></a>)}</div>}</div>}
     </article>
   );
 }
 
-function FallacyCard({ item }) {
+function SignalCard({ item, open, onToggle }) {
   return (
-    <article className={`result-card fallacy severity-${item.severity.toLowerCase()}`}>
-      <div className="card-top">
-        <span className="fallacy-icon"><Icon name="alert" size={17} /></span>
-        <span className="severity">{item.severity} RISK</span>
-      </div>
-      <h3>{item.name}</h3>
-      {item.quote && <blockquote>“{item.quote}”</blockquote>}
-      <p>{item.explanation}</p>
+    <article className={`swipe-card signal-card ${open ? "is-open" : ""}`}>
+      <button className="card-hit" onClick={onToggle} aria-expanded={open}>
+        <div className="signal-top"><span className="signal-mark">!</span><span>{item.severity} INFLUENCE</span></div>
+        <h3>{item.name}</h3>
+        {item.quote && <blockquote>“{item.quote}”</blockquote>}
+        <div className="peek"><span>{open ? "Hide detail" : "How it works"}</span><b>{open ? "−" : "+"}</b></div>
+      </button>
+      {open && <div className="card-detail"><p>{item.explanation}</p></div>}
     </article>
+  );
+}
+
+function Results({ result, onReset }) {
+  const [tab, setTab] = useState("facts");
+  const [openCard, setOpenCard] = useState(null);
+  const verdict = verdicts[result.overallVerdict] || verdicts.UNVERIFIABLE;
+  const counts = useMemo(() => result.claims.reduce((all, claim) => ({ ...all, [claim.verdict]: (all[claim.verdict] || 0) + 1 }), {}), [result.claims]);
+  const toggle = (key) => setOpenCard((current) => current === key ? null : key);
+  return (
+    <section className="result-view" id="results">
+      <header className="result-nav"><button onClick={onReset}><Icon name="close" size={18}/></button><span>Scan result</span><i>LIVE</i></header>
+      <div className={`verdict-hero tone-${verdict.tone}`}>
+        <div className="verdict-glow"/><div className="verdict-glyph">{verdict.glyph}</div>
+        <span>THE QUICK READ</span><h1>{verdict.label}</h1><p>{result.summary}</p>
+        <div className="confidence-pill"><b>{result.confidence}%</b> confidence <span>·</span> checked live</div>
+      </div>
+      <div className="snapshot">
+        <div><strong>{counts.TRUE || 0}</strong><span>Checks out</span></div>
+        <div><strong>{(counts.FALSE || 0) + (counts.MISLEADING || 0)}</strong><span>Needs context</span></div>
+        <div><strong>{result.fallacies.length}</strong><span>Persuasion flags</span></div>
+      </div>
+      <div className="segment" role="tablist">
+        <button className={tab === "facts" ? "active" : ""} onClick={() => { setTab("facts"); setOpenCard(null); }}>Quick facts <span>{result.claims.length}</span></button>
+        <button className={tab === "signals" ? "active" : ""} onClick={() => { setTab("signals"); setOpenCard(null); }}>Rhetoric <span>{result.fallacies.length}</span></button>
+      </div>
+      <div className="deck-intro"><div><h2>{tab === "facts" ? "What holds up" : "How it persuades"}</h2><p>{tab === "facts" ? "Swipe through. Tap only when you want the receipts." : "Patterns worth noticing—not a judgment of intent."}</p></div><span>SWIPE →</span></div>
+      <div className="card-deck">
+        {tab === "facts" && (result.claims.length ? result.claims.map((item, i) => <ClaimCard key={i} item={item} index={i} open={openCard === `f${i}`} onToggle={() => toggle(`f${i}`)}/>) : <div className="empty-card">No concrete claims to check.</div>)}
+        {tab === "signals" && (result.fallacies.length ? result.fallacies.map((item, i) => <SignalCard key={i} item={item} open={openCard === `r${i}`} onToggle={() => toggle(`r${i}`)}/>) : <div className="empty-card">No clear persuasion tricks detected.</div>)}
+        <div className="deck-spacer"/>
+      </div>
+      <div className="result-footer"><p>AI can miss things. For important decisions, open the sources.</p><button onClick={onReset}>Check another video <Icon name="arrow" size={17}/></button></div>
+    </section>
   );
 }
 
@@ -62,121 +120,36 @@ export default function Home() {
   const [status, setStatus] = useState("idle");
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
-
   async function pasteLink() {
-    try {
-      const text = await navigator.clipboard.readText();
-      setUrl(text);
-      setError("");
-    } catch {
-      setError("Clipboard access was blocked. Press and hold the field to paste.");
-    }
+    try { setUrl(await navigator.clipboard.readText()); setError(""); }
+    catch { setError("Press and hold the field to paste your link."); }
   }
-
   async function verify(event) {
-    event.preventDefault();
-    setStatus("loading");
-    setError("");
-    setResult(null);
+    event.preventDefault(); setStatus("loading"); setError("");
     try {
-      const response = await fetch("/api/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: url.trim() }),
-      });
+      const response = await fetch("/api/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: url.trim() }) });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || "Analysis failed. Please try again.");
-      setResult(data);
-      setStatus("success");
-      requestAnimationFrame(() => document.querySelector("#results")?.scrollIntoView({ behavior: "smooth" }));
-    } catch (err) {
-      setError(err.message);
-      setStatus("error");
-    }
+      if (!response.ok) throw new Error(data.error || "That scan didn't finish. Try once more.");
+      setResult(data); setStatus("success"); window.scrollTo({ top: 0 });
+    } catch (err) { setError(err.message); setStatus("error"); }
   }
-
-  const loading = status === "loading";
-
+  function reset() { setResult(null); setStatus("idle"); setUrl(""); setError(""); window.scrollTo({ top: 0, behavior: "smooth" }); }
+  if (status === "loading") return <LoadingScreen onCancel={() => setStatus("idle")}/>;
+  if (result) return <Results result={result} onReset={reset}/>;
   return (
-    <main>
-      <nav className="nav shell">
-        <a className="brand" href="#top" aria-label="chekit home"><span>c</span>chekit</a>
-        <span className="privacy"><span className="status-dot" /> Private analysis</span>
-      </nav>
-
-      <section className="hero shell" id="top">
-        <div className="eyebrow"><span>AI-POWERED</span> MEDIA LITERACY</div>
-        <h1>Don’t just watch.<br /><em>Chek it.</em></h1>
-        <p className="hero-copy">See what’s true, what’s twisted, and what’s trying to play you—in under a minute.</p>
-
-        <form className="scanner" onSubmit={verify}>
-          <label htmlFor="tiktok-url">TikTok video link</label>
-          <div className="input-wrap">
-            <Icon name="link" />
-            <input
-              id="tiktok-url"
-              type="url"
-              inputMode="url"
-              autoCapitalize="none"
-              autoCorrect="off"
-              placeholder="https://www.tiktok.com/@..."
-              value={url}
-              onChange={(event) => setUrl(event.target.value)}
-              required
-              disabled={loading}
-            />
-            <button className="paste" type="button" onClick={pasteLink} disabled={loading}>Paste</button>
-          </div>
-          <button className="scan-button" type="submit" disabled={loading || !url.trim()}>
-            {loading ? <><span className="spinner" />Analyzing video…</> : <>Scan video <Icon name="arrow" /></>}
-          </button>
-          <div className="scan-meta"><span><Icon name="check" size={14} /> No sign-up</span><span>•</span><span>Usually 20–40 sec</span></div>
+    <main className="home-view">
+      <nav className="home-nav"><a href="#top"><span>c</span>chekit</a><div><i/> Live sources</div></nav>
+      <section className="home-content" id="top">
+        <div className="hero-orb"><i/><span>?</span></div>
+        <div className="hero-text"><span>YOUR BS DETECTOR</span><h1>Before you believe it,<br/><em>chek it.</em></h1><p>Paste a TikTok. Get the truth, the missing context, and the tricks—in a glance.</p></div>
+        <form className="scan-panel" onSubmit={verify}>
+          <div className="url-field"><Icon name="link" size={19}/><input type="url" inputMode="url" autoCapitalize="none" autoCorrect="off" aria-label="TikTok video link" placeholder="Paste a TikTok link" value={url} onChange={(e) => setUrl(e.target.value)} required/><button type="button" onClick={pasteLink}>Paste</button></div>
+          <button className="primary-action" disabled={!url.trim()}>Chek this video <Icon name="arrow"/></button>
+          <div className="microcopy"><span>No login</span><i/><span>Private</span><i/><span>Live web check</span></div>
         </form>
-
-        {error && <div className="error" role="alert"><Icon name="alert" /><span>{error}</span></div>}
-        {loading && (
-          <div className="loading-panel" aria-live="polite">
-            <div className="loading-line"><span className="pulse-dot" /> Extracting transcript</div>
-            <div className="loading-line delay"><span className="pulse-dot" /> Checking claims and rhetoric</div>
-          </div>
-        )}
+        {error && <div className="home-error">! <span>{error}</span></div>}
       </section>
-
-      {result && (
-        <section className="results shell" id="results">
-          <div className={`score-card overall-${result.overallVerdict.toLowerCase()}`}>
-            <div>
-              <span className="score-label">OVERALL READ</span>
-              <h2>{verdictCopy[result.overallVerdict] || result.overallVerdict}</h2>
-              <p>{result.summary}</p>
-            </div>
-            <div className="confidence"><strong>{result.confidence}</strong><span>% confidence</span></div>
-          </div>
-
-          <div className="section-heading shield-heading">
-            <span className="heading-icon"><Icon name="shield" /></span>
-            <div><span>FACTUAL VERACITY</span><h2>Veracity Shield</h2></div>
-            <span className="count">{result.claims.length}</span>
-          </div>
-          <div className="card-grid">
-            {result.claims.length ? result.claims.map((item, index) => <ClaimCard item={item} index={index} key={index} />) : <div className="empty">No concrete fact-checkable claims were found.</div>}
-          </div>
-
-          <div className="section-heading rhetoric-heading">
-            <span className="heading-icon"><Icon name="alert" /></span>
-            <div><span>RHETORICAL LOGIC</span><h2>Rhetoric Alert</h2></div>
-            <span className="count">{result.fallacies.length}</span>
-          </div>
-          <div className="card-grid">
-            {result.fallacies.length ? result.fallacies.map((item, index) => <FallacyCard item={item} key={index} />) : <div className="empty">No clear manipulative fallacies were detected.</div>}
-          </div>
-
-          <p className="disclaimer">AI can make mistakes. Open the sources and verify important decisions yourself.</p>
-          <button className="new-scan" onClick={() => { setResult(null); setStatus("idle"); setUrl(""); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Scan another video</button>
-        </section>
-      )}
-
-      <footer className="shell">chekit <span>•</span> Clarity over virality</footer>
+      <div className="home-bottom"><span>Facts</span><i/>Context<span>Rhetoric</span></div>
     </main>
   );
 }
