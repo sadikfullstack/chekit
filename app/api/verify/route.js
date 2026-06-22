@@ -356,17 +356,18 @@ export async function POST(request) {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
-    const analysisRequest = (includeSearch = true) => ({
+    const analysisRequest = (modelName, includeSearch = true) => ({
       systemInstruction: { parts: [{ text: includeSearch
         ? combinedPrompt
         : `${combinedPrompt}\nLive search is unavailable. Mark every recent or time-sensitive claim UNVERIFIABLE; never rely on memory to declare it false.` }] },
       contents: [{ role: "user", parts: [{ text: userText }] }],
       ...(includeSearch ? { tools: [{ googleSearch: {} }] } : {}),
-      generationConfig: {
-        temperature: 0.05,
-        responseMimeType: "application/json",
-        responseJsonSchema: responseSchema,
-      },
+      generationConfig: modelName.startsWith("gemini-3.1")
+        ? { temperature: 0.05, responseMimeType: "application/json", responseJsonSchema: responseSchema }
+        // Gemini 2.5 supports grounding and JSON separately, but rejects their
+        // combination with a response schema. The system prompt still enforces
+        // JSON, and parseModelJson validates/extracts the returned object.
+        : { temperature: 0.05 },
     });
 
     const analyzeOnce = unstable_cache(async () => {
@@ -378,7 +379,7 @@ export async function POST(request) {
         if (!lane) break;
         excluded.add(lane.id);
         console.info(`[verify:${requestId}] Attempt ${attempt + 1}: ${lane.model}, key slot ${lane.slot}/${lane.totalKeys}`);
-        const response = await makeGeminiRequest(analysisRequest(true), lane);
+        const response = await makeGeminiRequest(analysisRequest(lane.model, true), lane);
         const payload = await response.json().catch(() => ({}));
         if (response.ok) {
           return { data: parseModelJson(responseText(payload)), usedModel: lane.model };
