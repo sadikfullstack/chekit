@@ -33,10 +33,11 @@ function LoadingScreen({ onCancel }) {
   const [seconds, setSeconds] = useState(0);
   useEffect(() => {
     const ticker = setInterval(() => setSeconds((value) => value + 1), 1000);
-    const stages = setInterval(() => setStep((value) => Math.min(value + 1, loadingSteps.length - 1)), 4300);
+    const stages = setInterval(() => setStep((value) => Math.min(value + 1, loadingSteps.length - 1)), 2100);
     return () => { clearInterval(ticker); clearInterval(stages); };
   }, []);
-  const progress = Math.min(92, 10 + seconds * 2.4);
+  // Front-load visible progress, then ease near completion while the live checks finish.
+  const progress = Math.min(96, seconds < 7 ? 18 + seconds * 9 : 81 + (seconds - 7) * 0.75);
   return (
     <div className="loading-screen" role="status" aria-live="polite">
       <button className="loading-close" onClick={onCancel} aria-label="Cancel scan"><Icon name="close"/></button>
@@ -47,7 +48,8 @@ function LoadingScreen({ onCancel }) {
         <h2>{loadingSteps[step][0]}</h2>
         <p>{loadingSteps[step][1]}</p>
       </div>
-      <div className="progress-wrap"><div className="progress-track"><span style={{ width: `${progress}%` }}/></div><small>{seconds < 8 ? "Warming up" : `${seconds}s · live analysis`}</small></div>
+      <div className="progress-wrap"><div className="progress-track"><span style={{ width: `${progress}%` }}/></div><small>{seconds < 3 ? "Video opened" : seconds < 7 ? "Claims found" : seconds < 12 ? "Sources coming in" : "Finishing the cross-check"}</small></div>
+      <div className="loading-wins"><span className={step > 0 ? "done" : "active"}>Transcript</span><span className={step > 2 ? "done" : step > 0 ? "active" : ""}>Timeline</span><span className={step > 3 ? "done" : step > 2 ? "active" : ""}>Sources</span></div>
       <p className="loading-tip">Good checks take a beat. We’re matching claims to the moment they were made.</p>
     </div>
   );
@@ -141,7 +143,7 @@ export default function Home() {
       <nav className="home-nav"><a href="#top"><span>c</span>chekit</a><div><i/> Live sources</div></nav>
       <section className="home-content" id="top">
         <div className="hero-orb"><i/><span>?</span></div>
-        <div className="hero-text"><span>YOUR BS DETECTOR</span><h1>Before you believe it,<br/><em>chek it.</em></h1><p>Paste a TikTok. Get the truth, the missing context, and the tricks—in a glance.</p></div>
+        <div className="hero-text"><span>A CLEARER SECOND LOOK</span><h1>Before you believe it,<br/><em>chek it.</em></h1><p>Paste a TikTok. Get the facts, missing context, and persuasion cues—in a glance.</p></div>
         <form className="scan-panel" onSubmit={verify}>
           <div className="url-field"><Icon name="link" size={19}/><input type="url" inputMode="url" autoCapitalize="none" autoCorrect="off" aria-label="TikTok video link" placeholder="Paste a TikTok link" value={url} onChange={(e) => setUrl(e.target.value)} required/><button type="button" onClick={pasteLink}>Paste</button></div>
           <button className="primary-action" disabled={!url.trim()}>Chek this video <Icon name="arrow"/></button>

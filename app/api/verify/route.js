@@ -183,7 +183,7 @@ export async function POST(request) {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
-    const [researchResponse, rhetoricResponse] = await Promise.all([
+    let [researchResponse, rhetoricResponse] = await Promise.all([
       makeGeminiRequest({
         systemInstruction: { parts: [{ text: researchPrompt }] },
         contents: [{ role: "user", parts: [{ text: userText }] }],
@@ -200,10 +200,23 @@ export async function POST(request) {
         },
       }),
     ]);
-    const [researchPayload, rhetoricPayload] = await Promise.all([
+    let [researchPayload, rhetoricPayload] = await Promise.all([
       researchResponse.json().catch(() => ({})),
       rhetoricResponse.json().catch(() => ({})),
     ]);
+
+    // Search grounding can be unavailable for a model, project, or region. Keep the
+    // scan useful and conservative instead of failing the entire request.
+    if (!researchResponse.ok && rhetoricResponse.ok) {
+      console.warn(`[verify:${requestId}] Grounded check unavailable (${researchResponse.status}); using conservative fallback`);
+      researchResponse = await makeGeminiRequest({
+        systemInstruction: { parts: [{ text: `${researchPrompt}\nLive search is unavailable for this fallback. Mark every recent or time-sensitive claim UNVERIFIABLE; never rely on memory to declare it false.` }] },
+        contents: [{ role: "user", parts: [{ text: userText }] }],
+        generationConfig: { temperature: 0.05, responseMimeType: "application/json" },
+      });
+      researchPayload = await researchResponse.json().catch(() => ({}));
+    }
+
     if (!researchResponse.ok || !rhetoricResponse.ok) {
       const failedResponse = !researchResponse.ok ? researchResponse : rhetoricResponse;
       const failedPayload = !researchResponse.ok ? researchPayload : rhetoricPayload;
