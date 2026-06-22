@@ -17,6 +17,31 @@ const loadingSteps = [
   ["Reading between the lines", "Spotting persuasive tricks"],
 ];
 
+function normalizeTikTokUrl(value) {
+  if (typeof value !== "string" || value.length > 4096) return null;
+  try {
+    const cleaned = value.replace(/[\u200B-\u200D\uFEFF]/g, " ").trim();
+    const match = cleaned.match(/(?:https?:\/\/)?(?:www\.|m\.|vm\.|vt\.)?tiktok\.com\/[^\s<>"']+/i);
+    if (!match) return null;
+    let candidate = match[0].replace(/[\])},.!;:'"]+$/g, "");
+    if (!/^https?:\/\//i.test(candidate)) candidate = `https://${candidate}`;
+    const parsed = new URL(candidate);
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    const hosts = new Set(["tiktok.com", "www.tiktok.com", "m.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"]);
+    if (parsed.protocol !== "https:" || !hosts.has(host) || parsed.username || parsed.password || parsed.port) return null;
+    const path = parsed.pathname.replace(/\/+$/, "");
+    const supported = ((host === "vm.tiktok.com" || host === "vt.tiktok.com") && path.length > 1)
+      || /^\/@[^/]+\/video\/\d+$/i.test(path)
+      || /^\/t\/[a-z0-9_-]+$/i.test(path)
+      || /^\/v\/\d+\.html$/i.test(path)
+      || /^\/(?:embed(?:\/v2)?|player\/v1)\/\d+$/i.test(path);
+    if (!supported) return null;
+    parsed.hostname = host;
+    parsed.hash = "";
+    return parsed.toString();
+  } catch { return null; }
+}
+
 function Icon({ name, size = 20 }) {
   const paths = {
     link: <><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1"/></>,
@@ -123,13 +148,24 @@ export default function Home() {
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   async function pasteLink() {
-    try { setUrl(await navigator.clipboard.readText()); setError(""); }
+    try {
+      const clipboard = await navigator.clipboard.readText();
+      const normalized = normalizeTikTokUrl(clipboard);
+      setUrl(normalized || clipboard.trim());
+      setError(normalized ? "" : "That clipboard text does not contain a supported TikTok video link.");
+    }
     catch { setError("Press and hold the field to paste your link."); }
   }
   async function verify(event) {
-    event.preventDefault(); setStatus("loading"); setError("");
+    event.preventDefault();
+    const normalizedUrl = normalizeTikTokUrl(url);
+    if (!normalizedUrl) {
+      setError("Paste a TikTok video link—not a profile, photo, or another website.");
+      return;
+    }
+    setUrl(normalizedUrl); setStatus("loading"); setError("");
     try {
-      const response = await fetch("/api/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: url.trim() }) });
+      const response = await fetch("/api/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: normalizedUrl }) });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "That scan didn't finish. Try once more.");
       setResult(data); setStatus("success"); window.scrollTo({ top: 0 });
@@ -145,7 +181,7 @@ export default function Home() {
         <div className="hero-orb"><i/><span>?</span></div>
         <div className="hero-text"><span>A CLEARER SECOND LOOK</span><h1>Before you believe it,<br/><em>chek it.</em></h1><p>Paste a TikTok. Get the facts, missing context, and persuasion cues—in a glance.</p></div>
         <form className="scan-panel" onSubmit={verify}>
-          <div className="url-field"><Icon name="link" size={19}/><input type="url" inputMode="url" autoCapitalize="none" autoCorrect="off" aria-label="TikTok video link" placeholder="Paste a TikTok link" value={url} onChange={(e) => setUrl(e.target.value)} required/><button type="button" onClick={pasteLink}>Paste</button></div>
+          <div className="url-field"><Icon name="link" size={19}/><input type="text" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck="false" aria-label="TikTok video link" placeholder="Paste a TikTok link" value={url} onChange={(e) => { setUrl(e.target.value); setError(""); }} required/><button type="button" onClick={pasteLink}>Paste</button></div>
           <button className="primary-action" disabled={!url.trim()}>Chek this video <Icon name="arrow"/></button>
           <div className="microcopy"><span>No login</span><i/><span>Private</span><i/><span>Live web check</span></div>
         </form>
