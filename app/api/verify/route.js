@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
-import { unstable_cache } from "next/cache";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-const TRANSCRIPT_LIMIT = 30000;
-const TRANSCRIPT_TIMEOUT_MS = 10000;
-const GEMINI_TIMEOUT_MS = 14000;
-const REQUEST_BUDGET_MS = 54000;
+const TRANSCRIPT_LIMIT = 16000;
+const TRANSCRIPT_TIMEOUT_MS = 7000;
+const GEMINI_TIMEOUT_MS = 8500;
+const REQUEST_BUDGET_MS = 26000;
+const MAX_ANALYSIS_LANES = 3;
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const RATE_LIMIT_MAX = 8;
 const TIKTOK_HOSTS = new Set([
@@ -22,6 +23,7 @@ const TIKTOK_HOSTS = new Set([
 // instances. A platform/WAF rule can be layered on top for distributed attacks.
 const rateLimitStore = globalThis.__chekitRateLimitStore || new Map();
 globalThis.__chekitRateLimitStore = rateLimitStore;
+globalThis.__chekitAnalysisCache ||= new Map();
 globalThis.__chekitGeminiRouter ||= {
   modelCursor: 0,
   keyCursor: 0,
@@ -150,6 +152,26 @@ function takeRateLimit(request) {
     }
   }
   return { allowed: true, remaining: RATE_LIMIT_MAX - recent.length };
+}
+
+function getCachedAnalysis(hash) {
+  const cache = globalThis.__chekitAnalysisCache;
+  const cached = cache.get(hash);
+  if (!cached) return null;
+  if (Date.now() - cached.createdAt > CACHE_TTL_MS) {
+    cache.delete(hash);
+    return null;
+  }
+  return cached.value;
+}
+
+function setCachedAnalysis(hash, value) {
+  const cache = globalThis.__chekitAnalysisCache;
+  cache.set(hash, { createdAt: Date.now(), value });
+  if (cache.size > 150) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey) cache.delete(oldestKey);
+  }
 }
 
 function geminiKeys() {
@@ -443,6 +465,13 @@ export async function POST(request) {
     const transcriptHash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
     console.info(`[verify:${requestId}] Single-pass routed analysis; cache=${transcriptHash.slice(0, 10)}`);
 
+    const cachedAnalysis = getCachedAnalysis(transcriptHash);
+    if (cachedAnalysis) {
+      const result = normalizeResult(cachedAnalysis.data);
+      console.info(`[verify:${requestId}] Cache hit: ${result.claims.length} claims, ${result.fallacies.length} alerts, ${Date.now() - startedAt}ms`);
+      return NextResponse.json({ ...result, meta: { transcriptCharacters: transcript.length, truncated: transcript.length > TRANSCRIPT_LIMIT, model: cachedAnalysis.usedModel, cacheHours: 24, cached: true } });
+    }
+
     const makeGeminiRequest = (body, lane) => fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(lane.model)}:generateContent`, {
       method: "POST",
@@ -466,10 +495,10 @@ export async function POST(request) {
         : { temperature: 0.05 },
     });
 
-    const analyzeOnce = unstable_cache(async () => {
+    const analyzeOnce = async () => {
       let lastStatus = 502;
       let lastPayload = {};
-      const lanes = geminiLanes();
+      const lanes = geminiLanes().slice(0, MAX_ANALYSIS_LANES);
       console.info(`[verify:${requestId}] Candidate lanes: ${lanes.map((lane) => `${lane.model}/key${lane.slot}`).join(", ")}`);
       for (let attempt = 0; attempt < lanes.length; attempt += 1) {
         if (Date.now() - startedAt > REQUEST_BUDGET_MS - GEMINI_TIMEOUT_MS - 1000) {
@@ -519,7 +548,7 @@ export async function POST(request) {
       );
       error.status = lastStatus === 429 ? 429 : lastStatus === 504 ? 504 : 502;
       throw error;
-    }, ["chekit-analysis-v8", transcriptHash], { revalidate: 86400 });
+    };
 
     let analysis;
     try {
@@ -528,6 +557,7 @@ export async function POST(request) {
       if (error?.status) return errorResponse(error.message, error.status, "AI_FAILED");
       throw error;
     }
+    setCachedAnalysis(transcriptHash, analysis);
     const result = normalizeResult(analysis.data);
     console.info(`[verify:${requestId}] Complete: ${result.claims.length} claims, ${result.fallacies.length} alerts, ${Date.now() - startedAt}ms`);
     return NextResponse.json({ ...result, meta: { transcriptCharacters: transcript.length, truncated: transcript.length > TRANSCRIPT_LIMIT, model: analysis.usedModel, cacheHours: 24 } });
