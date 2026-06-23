@@ -28,6 +28,7 @@ globalThis.__chekitGeminiRouter ||= {
   keyCursor: 0,
   cooldowns: new Map(),
   keyCooldowns: new Map(),
+  laneStats: new Map(),
 };
 
 const responseSchema = {
@@ -182,11 +183,11 @@ function geminiKeys() {
 
 function modelSchedule() {
   const raw = process.env.GEMINI_MODEL_POOL
-    || "gemini-3.1-flash-lite:15,gemini-2.5-flash-lite:1,gemini-2.5-flash:1";
+    || "gemini-2.5-flash-lite:4,gemini-2.5-flash:1";
   const models = raw.split(",").map((entry) => {
     const [name, weightText] = entry.trim().split(":");
     return { name, weight: Math.max(1, Math.min(30, Number(weightText) || 1)), current: 0 };
-  }).filter((model) => /^gemini-[a-z0-9.-]+$/i.test(model.name));
+  }).filter((model) => /^gemini-[a-z0-9.-]+$/i.test(model.name) && supportsGoogleSearchGrounding(model.name));
   const schedule = [];
   const total = models.reduce((sum, model) => sum + model.weight, 0);
   for (let index = 0; index < total; index += 1) {
@@ -200,15 +201,43 @@ function modelSchedule() {
 
 function modelPool() {
   const raw = process.env.GEMINI_MODEL_POOL
-    || "gemini-3.1-flash-lite:15,gemini-2.5-flash-lite:1,gemini-2.5-flash:1";
+    || "gemini-2.5-flash-lite:4,gemini-2.5-flash:1";
   const seen = new Set();
   return raw.split(",").map((entry) => entry.trim().split(":")[0])
     .filter((name) => /^gemini-[a-z0-9.-]+$/i.test(name))
+    .filter((name) => supportsGoogleSearchGrounding(name))
     .filter((name) => {
       if (seen.has(name)) return false;
       seen.add(name);
       return true;
     });
+}
+
+function supportsGoogleSearchGrounding(modelName) {
+  return [
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash",
+  ].includes(modelName);
+}
+
+function laneStat(id) {
+  const stats = globalThis.__chekitGeminiRouter.laneStats;
+  if (!stats.has(id)) stats.set(id, { attempts: 0, failures: 0, successes: 0 });
+  return stats.get(id);
+}
+
+function markLaneAttempt(lane) {
+  laneStat(lane.id).attempts += 1;
+}
+
+function markLaneSuccess(lane) {
+  laneStat(lane.id).successes += 1;
+}
+
+function markLaneFailure(lane) {
+  laneStat(lane.id).failures += 1;
 }
 
 function geminiLanes() {
@@ -238,6 +267,13 @@ function geminiLanes() {
     console.warn("[verify] All Gemini lanes were filtered by local cooldown; ignoring soft cooldowns once");
     lanes = build(true);
   }
+  lanes.sort((a, b) => {
+    const aStats = laneStat(a.id);
+    const bStats = laneStat(b.id);
+    const aScore = aStats.attempts + aStats.failures * 3 - aStats.successes;
+    const bScore = bStats.attempts + bStats.failures * 3 - bStats.successes;
+    return aScore - bScore;
+  });
   router.modelCursor = (router.modelCursor + 1) % Math.max(schedule.length, 1);
   router.keyCursor = (router.keyCursor + 1) % Math.max(keys.length, 1);
   return lanes;
@@ -436,7 +472,7 @@ export async function POST(request) {
     console.error(`[verify:${requestId}] API keys are missing`);
     return errorResponse("The server API keys have not been configured.", 503, "NOT_CONFIGURED");
   }
-  console.info(`[verify:${requestId}] Gemini router ready: ${configuredGeminiKeys.length} key slot(s)`);
+  console.info(`[verify:${requestId}] Gemini router ready: ${configuredGeminiKeys.length} key slot(s); grounded models=${modelPool().join(",") || "none"}`);
 
   let body;
   try {
@@ -562,6 +598,7 @@ export async function POST(request) {
         }
         const lane = lanes[attempt];
         const attemptStartedAt = Date.now();
+        markLaneAttempt(lane);
         console.info(`[verify:${requestId}] Attempt ${attempt + 1}: ${lane.model}, key slot ${lane.slot}/${lane.totalKeys}`);
         try {
           const response = await makeGeminiRequest(analysisRequest(lane.model, true), lane);
@@ -569,11 +606,13 @@ export async function POST(request) {
           if (response.ok) {
             try {
               console.info(`[verify:${requestId}] Gemini ok (${lane.model}, ${Date.now() - attemptStartedAt}ms)`);
+              markLaneSuccess(lane);
               return { data: parseModelJson(responseText(payload)), usedModel: lane.model };
             } catch (parseError) {
               lastStatus = 502;
               lastPayload = { error: { message: parseError.message } };
               failures.push({ status: 502, model: lane.model, keySlot: lane.slot, message: parseError.message });
+              markLaneFailure(lane);
               coolDownGeminiLaneAfterError(lane, parseError);
               console.warn(`[verify:${requestId}] Invalid Gemini JSON from ${lane.model}; trying another lane`);
               continue;
@@ -587,6 +626,7 @@ export async function POST(request) {
             keySlot: lane.slot,
             message: String(payload?.error?.message || response.statusText || "Gemini request failed").slice(0, 220),
           });
+          markLaneFailure(lane);
           coolDownGeminiLane(lane, response);
           if (response.status === 429 && looksLikeQuotaExhausted(payload)) {
             console.warn(`[verify:${requestId}] ${lane.model} on key slot ${lane.slot} appears quota-exhausted; trying remaining lanes`);
@@ -596,6 +636,7 @@ export async function POST(request) {
           lastStatus = isTimeout(error) ? 504 : 502;
           lastPayload = { error: { message: error.message } };
           failures.push({ status: lastStatus, model: lane.model, keySlot: lane.slot, message: String(error.message || "Request failed").slice(0, 220) });
+          markLaneFailure(lane);
           coolDownGeminiLaneAfterError(lane, error);
           console.warn(`[verify:${requestId}] Gemini lane error on ${lane.model} after ${Date.now() - attemptStartedAt}ms: ${error.message}`);
         }
