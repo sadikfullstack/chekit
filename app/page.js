@@ -89,7 +89,11 @@ function ClaimCard({ item, index, open, onToggle }) {
         <h3>{item.claim}</h3>
         <div className="peek"><span>{open ? "Hide detail" : "Why this verdict"}</span><b>{open ? "−" : "+"}</b></div>
       </button>
-      {open && <div className="card-detail"><p>{item.explanation}</p>{item.sources?.length > 0 && <div className="source-list">{item.sources.map((source, i) => <a key={`${source.url}-${i}`} href={source.url} target="_blank" rel="noopener noreferrer"><Icon name="source" size={14}/><span>{source.label}</span><Icon name="arrow" size={13}/></a>)}</div>}</div>}
+      {open && <div className="card-detail">
+        <p>{item.explanation}</p>
+        {item.sources?.length > 0 && <div className="source-list"><small>Supports verdict</small>{item.sources.map((source, i) => <a key={`${source.url}-${i}`} href={source.url} target="_blank" rel="noopener noreferrer"><Icon name="source" size={14}/><span>{source.label}</span><Icon name="arrow" size={13}/></a>)}</div>}
+        {item.counterEvidence?.length > 0 && <div className="source-list counter-list"><small>Pushes back</small>{item.counterEvidence.map((source, i) => <a key={`${source.url}-${i}`} href={source.url} target="_blank" rel="noopener noreferrer"><Icon name="source" size={14}/><span>{source.label}</span><Icon name="arrow" size={13}/></a>)}</div>}
+      </div>}
     </article>
   );
 }

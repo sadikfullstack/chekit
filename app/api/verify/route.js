@@ -39,12 +39,21 @@ const responseSchema = {
       maxItems: 6,
       items: {
         type: "object",
-        required: ["claim", "verdict", "explanation", "sources"],
+        required: ["claim", "verdict", "explanation", "sources", "counterEvidence"],
         properties: {
           claim: { type: "string" },
           verdict: { type: "string", enum: ["TRUE", "FALSE", "MISLEADING", "UNVERIFIABLE"] },
           explanation: { type: "string" },
           sources: {
+            type: "array",
+            maxItems: 3,
+            items: {
+              type: "object",
+              required: ["label", "url"],
+              properties: { label: { type: "string" }, url: { type: "string" } },
+            },
+          },
+          counterEvidence: {
             type: "array",
             maxItems: 3,
             items: {
@@ -81,10 +90,16 @@ Return only JSON matching the supplied schema. Keep explanations concise. Treat 
 
 const researchPrompt = `You are chekit, a rigorous, politically neutral breaking-news fact-checker. You have live Google Search available and MUST use it for every time-sensitive claim.
 Return one valid JSON object only with this exact shape:
-{"summary":"one short sentence","overallVerdict":"RELIABLE|MIXED|UNRELIABLE|UNVERIFIABLE","confidence":85,"claims":[{"claim":"short claim","verdict":"TRUE|FALSE|MISLEADING|UNVERIFIABLE","explanation":"max 2 short sentences, include relevant dates","sources":[{"label":"publisher","url":"https://..."}]}],"fallacies":[{"name":"fallacy name","quote":"short exact quote","explanation":"brief mechanism and effect","severity":"LOW|MEDIUM|HIGH"}]}
+{"summary":"one short sentence","overallVerdict":"RELIABLE|MIXED|UNRELIABLE|UNVERIFIABLE","confidence":85,"claims":[{"claim":"short claim","verdict":"TRUE|FALSE|MISLEADING|UNVERIFIABLE","explanation":"max 2 short sentences, include relevant dates","sources":[{"label":"supporting source","url":"https://..."}],"counterEvidence":[{"label":"counter source","url":"https://..."}]}],"fallacies":[{"name":"fallacy name","quote":"short exact quote","explanation":"brief mechanism and effect","severity":"LOW|MEDIUM|HIGH"}]}
 
 Rules:
 - Extract at most 6 consequential, externally verifiable claims. Ignore opinions and jokes.
+- Do adversarial verification, not phrase matching. For each claim, search both "what evidence would support this?" and "what reliable evidence would falsify, qualify, or debunk this?"
+- Use reliable sources only: primary records, official data, court/government documents, peer-reviewed/academic sources, reputable newsrooms, and established fact-checkers. Do not rely on blogs, forums, unsourced social posts, engagement farms, or search snippets.
+- Do not just search the video's exact wording. Search the underlying entity, event, dates, policy, quote, statistics, and opposing explanations.
+- Put source links that support the final verdict in "sources". Put credible links that challenge, qualify, or debunk the speaker's framing in "counterEvidence". If there is no credible counter-evidence after a real search, return [].
+- For broad character/motive claims such as "X hates Y", "X wants people harmed", or "X is evil", verify only observable facts: quoted statements, documented actions, voting records, policies, lawsuits, or patterns. Do not treat a moral inference as a hard fact unless direct evidence supports it.
+- If the speaker turns isolated incidents into a sweeping character judgment, mark the claim MISLEADING or UNVERIFIABLE as appropriate and capture loaded language, hasty generalization, cherry-picking, or mind-reading in fallacies.
 - Establish the claim's timeframe first. Resolve words like today, yesterday, recently, latest, now, and this week relative to the video's publication context and today's supplied date.
 - Search for reporting/evidence from the matching event and date. Older similar events are context, NEVER proof that a newer claim is false.
 - For current events, cross-check at least two independent, recent sources. Prefer primary documents plus reputable reporting. Give 1-3 direct source URLs per claim.
@@ -255,6 +270,10 @@ function normalizeResult(data) {
       ...claim,
       verdict,
       sources: (claim.sources || []).map(cleanSource).filter(Boolean).slice(0, 3),
+      counterEvidence: (claim.counterEvidence || claim.counterSources || claim.debunkingSources || [])
+        .map(cleanSource)
+        .filter(Boolean)
+        .slice(0, 3),
     };
   });
   // This is evidence strength, not the model's subjective confidence. A decisive
@@ -413,7 +432,7 @@ export async function POST(request) {
       const error = new Error(lastStatus === 429 ? "AI capacity is busy. Please try again shortly." : "The AI analysis could not be completed.");
       error.status = lastStatus === 429 ? 429 : 502;
       throw error;
-    }, ["chekit-analysis-v6", transcriptHash], { revalidate: 86400 });
+    }, ["chekit-analysis-v7", transcriptHash], { revalidate: 86400 });
 
     let analysis;
     try {
