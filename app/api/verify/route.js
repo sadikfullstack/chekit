@@ -7,7 +7,6 @@ const TRANSCRIPT_LIMIT = 16000;
 const TRANSCRIPT_TIMEOUT_MS = 7000;
 const GEMINI_TIMEOUT_MS = 8500;
 const REQUEST_BUDGET_MS = 26000;
-const MAX_ANALYSIS_LANES = 3;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const RATE_LIMIT_MAX = 8;
@@ -379,6 +378,37 @@ function looksLikeQuotaExhausted(payload) {
   return message.includes("quota") || message.includes("requests per day") || message.includes("rpd");
 }
 
+function publicGeminiFailureMessage(status, failures = []) {
+  if (failures.some((failure) => failure.status === 429)) {
+    return {
+      status: 429,
+      message: "All available Gemini lanes are temporarily out of capacity. Try again later or add another project key.",
+    };
+  }
+  if (failures.some((failure) => failure.status === 403)) {
+    return {
+      status: 503,
+      message: "One or more Gemini keys are not authorized for this model or project. Check the key/project setup.",
+    };
+  }
+  if (failures.length && failures.every((failure) => failure.status === 400 || failure.status === 404)) {
+    return {
+      status: 503,
+      message: "The configured Gemini model pool is not accepted by the API. Check GEMINI_MODEL_POOL.",
+    };
+  }
+  if (failures.some((failure) => failure.status === 504)) {
+    return {
+      status: 504,
+      message: "The fact-check took too long. Try a shorter video or scan again.",
+    };
+  }
+  return {
+    status: 502,
+    message: "The AI analysis could not be completed cleanly. Please try again.",
+  };
+}
+
 function parseModelJson(text) {
   const cleaned = text.replace(/```(?:json)?/gi, "").trim();
   const start = cleaned.indexOf("{");
@@ -498,12 +528,14 @@ export async function POST(request) {
     const analyzeOnce = async () => {
       let lastStatus = 502;
       let lastPayload = {};
-      const lanes = geminiLanes().slice(0, MAX_ANALYSIS_LANES);
+      const failures = [];
+      const lanes = geminiLanes();
       console.info(`[verify:${requestId}] Candidate lanes: ${lanes.map((lane) => `${lane.model}/key${lane.slot}`).join(", ")}`);
       for (let attempt = 0; attempt < lanes.length; attempt += 1) {
-        if (Date.now() - startedAt > REQUEST_BUDGET_MS - GEMINI_TIMEOUT_MS - 1000) {
+        if (Date.now() - startedAt > REQUEST_BUDGET_MS - 3000) {
           lastStatus = 504;
           lastPayload = { error: { message: "Request budget exhausted before next Gemini attempt" } };
+          failures.push({ status: 504, model: "budget", keySlot: 0, message: lastPayload.error.message });
           break;
         }
         const lane = lanes[attempt];
@@ -519,6 +551,7 @@ export async function POST(request) {
             } catch (parseError) {
               lastStatus = 502;
               lastPayload = { error: { message: parseError.message } };
+              failures.push({ status: 502, model: lane.model, keySlot: lane.slot, message: parseError.message });
               coolDownGeminiLaneAfterError(lane, parseError);
               console.warn(`[verify:${requestId}] Invalid Gemini JSON from ${lane.model}; trying another lane`);
               continue;
@@ -526,6 +559,12 @@ export async function POST(request) {
           }
           lastStatus = response.status;
           lastPayload = payload;
+          failures.push({
+            status: response.status,
+            model: lane.model,
+            keySlot: lane.slot,
+            message: String(payload?.error?.message || response.statusText || "Gemini request failed").slice(0, 220),
+          });
           coolDownGeminiLane(lane, response);
           if (response.status === 429 && looksLikeQuotaExhausted(payload)) {
             console.warn(`[verify:${requestId}] ${lane.model} on key slot ${lane.slot} appears quota-exhausted; trying remaining lanes`);
@@ -534,19 +573,16 @@ export async function POST(request) {
         } catch (error) {
           lastStatus = isTimeout(error) ? 504 : 502;
           lastPayload = { error: { message: error.message } };
+          failures.push({ status: lastStatus, model: lane.model, keySlot: lane.slot, message: String(error.message || "Request failed").slice(0, 220) });
           coolDownGeminiLaneAfterError(lane, error);
           console.warn(`[verify:${requestId}] Gemini lane error on ${lane.model} after ${Date.now() - attemptStartedAt}ms: ${error.message}`);
         }
       }
-      console.error(`[verify:${requestId}] Gemini pool exhausted`, lastPayload?.error);
-      const error = new Error(
-        lastStatus === 429
-          ? "AI capacity is busy. Please try again shortly."
-          : lastStatus === 504
-            ? "The fact-check took too long. Try a shorter video or scan again."
-            : "The AI analysis could not be completed cleanly. Please try again."
-      );
-      error.status = lastStatus === 429 ? 429 : lastStatus === 504 ? 504 : 502;
+      const publicFailure = publicGeminiFailureMessage(lastStatus, failures);
+      console.error(`[verify:${requestId}] Gemini pool exhausted`, { finalStatus: publicFailure.status, failures });
+      const error = new Error(publicFailure.message);
+      error.status = publicFailure.status;
+      error.failures = failures;
       throw error;
     };
 
