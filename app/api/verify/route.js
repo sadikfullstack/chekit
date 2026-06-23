@@ -219,16 +219,24 @@ function geminiLanes() {
   const primaryModel = schedule[router.modelCursor % Math.max(schedule.length, 1)] || fallbackModels[0];
   const models = [primaryModel, ...fallbackModels.filter((model) => model !== primaryModel)];
   const now = Date.now();
-  const lanes = [];
-  for (let modelIndex = 0; modelIndex < models.length; modelIndex += 1) {
-    const model = models[(router.modelCursor + modelIndex) % models.length];
-    for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
-      const keyInfo = keys[(router.keyCursor + keyIndex) % keys.length];
-      const id = `${keyInfo.slot}:${model}`;
-      if ((router.cooldowns.get(id) || 0) > now) continue;
-      if ((router.keyCooldowns.get(keyInfo.slot) || 0) > now) continue;
-      lanes.push({ ...keyInfo, model, id, totalKeys: keys.length });
+  const build = (ignoreSoftCooldowns = false) => {
+    const lanes = [];
+    for (let modelIndex = 0; modelIndex < models.length; modelIndex += 1) {
+      const model = models[(router.modelCursor + modelIndex) % models.length];
+      for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+        const keyInfo = keys[(router.keyCursor + keyIndex) % keys.length];
+        const id = `${keyInfo.slot}:${model}`;
+        if (!ignoreSoftCooldowns && (router.cooldowns.get(id) || 0) > now) continue;
+        if ((router.keyCooldowns.get(keyInfo.slot) || 0) > now) continue;
+        lanes.push({ ...keyInfo, model, id, totalKeys: keys.length });
+      }
     }
+    return lanes;
+  };
+  let lanes = build(false);
+  if (!lanes.length) {
+    console.warn("[verify] All Gemini lanes were filtered by local cooldown; ignoring soft cooldowns once");
+    lanes = build(true);
   }
   router.modelCursor = (router.modelCursor + 1) % Math.max(schedule.length, 1);
   router.keyCursor = (router.keyCursor + 1) % Math.max(keys.length, 1);
@@ -260,7 +268,7 @@ function coolDownGeminiLane(lane, response) {
     router.keyCooldowns.set(lane.slot, Date.now() + 30 * 60 * 1000);
   } else {
     const duration = retrySeconds * 1000
-      || ([400, 404].includes(response.status) ? 60 * 60 * 1000 : response.status === 429 ? 15 * 60 * 1000 : 30 * 1000);
+      || ([400, 404].includes(response.status) ? 60 * 60 * 1000 : response.status === 429 ? 60 * 1000 : 15 * 1000);
     router.cooldowns.set(lane.id, Date.now() + duration);
   }
 }
