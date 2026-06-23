@@ -5,9 +5,9 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const TRANSCRIPT_LIMIT = 30000;
-const TRANSCRIPT_TIMEOUT_MS = 12000;
-const GEMINI_TIMEOUT_MS = 22000;
-const MAX_GEMINI_ATTEMPTS = 2;
+const TRANSCRIPT_TIMEOUT_MS = 10000;
+const GEMINI_TIMEOUT_MS = 14000;
+const REQUEST_BUDGET_MS = 54000;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const RATE_LIMIT_MAX = 8;
 const TIKTOK_HOSTS = new Set([
@@ -177,6 +177,43 @@ function modelSchedule() {
   return schedule;
 }
 
+function modelPool() {
+  const raw = process.env.GEMINI_MODEL_POOL
+    || "gemini-3.1-flash-lite:15,gemini-2.5-flash-lite:1,gemini-2.5-flash:1";
+  const seen = new Set();
+  return raw.split(",").map((entry) => entry.trim().split(":")[0])
+    .filter((name) => /^gemini-[a-z0-9.-]+$/i.test(name))
+    .filter((name) => {
+      if (seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    });
+}
+
+function geminiLanes() {
+  const router = globalThis.__chekitGeminiRouter;
+  const keys = geminiKeys();
+  const schedule = modelSchedule();
+  const fallbackModels = modelPool();
+  const primaryModel = schedule[router.modelCursor % Math.max(schedule.length, 1)] || fallbackModels[0];
+  const models = [primaryModel, ...fallbackModels.filter((model) => model !== primaryModel)];
+  const now = Date.now();
+  const lanes = [];
+  for (let modelIndex = 0; modelIndex < models.length; modelIndex += 1) {
+    const model = models[(router.modelCursor + modelIndex) % models.length];
+    for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+      const keyInfo = keys[(router.keyCursor + keyIndex) % keys.length];
+      const id = `${keyInfo.slot}:${model}`;
+      if ((router.cooldowns.get(id) || 0) > now) continue;
+      if ((router.keyCooldowns.get(keyInfo.slot) || 0) > now) continue;
+      lanes.push({ ...keyInfo, model, id, totalKeys: keys.length });
+    }
+  }
+  router.modelCursor = (router.modelCursor + 1) % Math.max(schedule.length, 1);
+  router.keyCursor = (router.keyCursor + 1) % Math.max(keys.length, 1);
+  return lanes;
+}
+
 function nextGeminiLane(excluded = new Set()) {
   const keys = geminiKeys();
   const models = modelSchedule();
@@ -315,6 +352,11 @@ function responseText(payload) {
   return payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "";
 }
 
+function looksLikeQuotaExhausted(payload) {
+  const message = String(payload?.error?.message || "").toLowerCase();
+  return message.includes("quota") || message.includes("requests per day") || message.includes("rpd");
+}
+
 function parseModelJson(text) {
   const cleaned = text.replace(/```(?:json)?/gi, "").trim();
   const start = cleaned.indexOf("{");
@@ -425,13 +467,17 @@ export async function POST(request) {
     });
 
     const analyzeOnce = unstable_cache(async () => {
-      const excluded = new Set();
       let lastStatus = 502;
       let lastPayload = {};
-      for (let attempt = 0; attempt < MAX_GEMINI_ATTEMPTS; attempt += 1) {
-        const lane = nextGeminiLane(excluded);
-        if (!lane) break;
-        excluded.add(lane.id);
+      const lanes = geminiLanes();
+      console.info(`[verify:${requestId}] Candidate lanes: ${lanes.map((lane) => `${lane.model}/key${lane.slot}`).join(", ")}`);
+      for (let attempt = 0; attempt < lanes.length; attempt += 1) {
+        if (Date.now() - startedAt > REQUEST_BUDGET_MS - GEMINI_TIMEOUT_MS - 1000) {
+          lastStatus = 504;
+          lastPayload = { error: { message: "Request budget exhausted before next Gemini attempt" } };
+          break;
+        }
+        const lane = lanes[attempt];
         const attemptStartedAt = Date.now();
         console.info(`[verify:${requestId}] Attempt ${attempt + 1}: ${lane.model}, key slot ${lane.slot}/${lane.totalKeys}`);
         try {
@@ -452,6 +498,9 @@ export async function POST(request) {
           lastStatus = response.status;
           lastPayload = payload;
           coolDownGeminiLane(lane, response);
+          if (response.status === 429 && looksLikeQuotaExhausted(payload)) {
+            console.warn(`[verify:${requestId}] ${lane.model} on key slot ${lane.slot} appears quota-exhausted; trying remaining lanes`);
+          }
           console.warn(`[verify:${requestId}] Lane cooled after ${response.status}: ${lane.model}, key slot ${lane.slot}, ${Date.now() - attemptStartedAt}ms`);
         } catch (error) {
           lastStatus = isTimeout(error) ? 504 : 502;
