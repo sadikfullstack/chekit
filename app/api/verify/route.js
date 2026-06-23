@@ -5,9 +5,10 @@ export const maxDuration = 60;
 
 const TRANSCRIPT_LIMIT = 16000;
 const TRANSCRIPT_TIMEOUT_MS = 18000;
-const GEMINI_TIMEOUT_MS = 32000;
-const REQUEST_BUDGET_MS = 56000;
-const MAX_GEMINI_LANES = 2;
+const GROUNDED_GEMINI_TIMEOUT_MS = 26000;
+const FAST_GEMINI_TIMEOUT_MS = 12000;
+const REQUEST_BUDGET_MS = 58000;
+const MAX_GEMINI_LANES = 1;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const RATE_LIMIT_MAX = 8;
@@ -558,16 +559,16 @@ export async function POST(request) {
     if (cachedAnalysis) {
       const result = normalizeResult(cachedAnalysis.data);
       console.info(`[verify:${requestId}] Cache hit: ${result.claims.length} claims, ${result.fallacies.length} alerts, ${Date.now() - startedAt}ms`);
-      return NextResponse.json({ ...result, meta: { transcriptCharacters: transcript.length, truncated: transcript.length > TRANSCRIPT_LIMIT, model: cachedAnalysis.usedModel, cacheHours: 24, cached: true } });
+      return NextResponse.json({ ...result, meta: { transcriptCharacters: transcript.length, truncated: transcript.length > TRANSCRIPT_LIMIT, model: cachedAnalysis.usedModel, grounded: cachedAnalysis.grounded ?? true, cacheHours: 24, cached: true } });
     }
 
-    const makeGeminiRequest = (body, lane) => fetch(
+    const makeGeminiRequest = (body, lane, timeoutMs = GROUNDED_GEMINI_TIMEOUT_MS) => fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(lane.model)}:generateContent`, {
       method: "POST",
       headers: { "x-goog-api-key": lane.key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
       cache: "no-store",
-      signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     const analysisRequest = (modelName, includeSearch = true) => ({
@@ -602,13 +603,13 @@ export async function POST(request) {
         markLaneAttempt(lane);
         console.info(`[verify:${requestId}] Attempt ${attempt + 1}: ${lane.model}, key slot ${lane.slot}/${lane.totalKeys}`);
         try {
-          const response = await makeGeminiRequest(analysisRequest(lane.model, true), lane);
+          const response = await makeGeminiRequest(analysisRequest(lane.model, true), lane, GROUNDED_GEMINI_TIMEOUT_MS);
           const payload = await response.json().catch(() => ({}));
           if (response.ok) {
             try {
               console.info(`[verify:${requestId}] Gemini ok (${lane.model}, ${Date.now() - attemptStartedAt}ms)`);
               markLaneSuccess(lane);
-              return { data: parseModelJson(responseText(payload)), usedModel: lane.model };
+              return { data: parseModelJson(responseText(payload)), usedModel: lane.model, grounded: true };
             } catch (parseError) {
               lastStatus = 502;
               lastPayload = { error: { message: parseError.message } };
@@ -650,17 +651,52 @@ export async function POST(request) {
       throw error;
     };
 
+    const analyzeFastFallback = async (previousError) => {
+      if (Date.now() - startedAt > REQUEST_BUDGET_MS - FAST_GEMINI_TIMEOUT_MS - 1000) {
+        throw previousError;
+      }
+      const lanes = geminiLanes().slice(0, 3);
+      console.warn(`[verify:${requestId}] Grounded analysis failed; trying fast fallback lanes: ${lanes.map((lane) => `${lane.model}/key${lane.slot}`).join(", ")}`);
+      let lastError = previousError;
+      for (const lane of lanes) {
+        const attemptStartedAt = Date.now();
+        markLaneAttempt(lane);
+        try {
+          const response = await makeGeminiRequest(analysisRequest(lane.model, false), lane, FAST_GEMINI_TIMEOUT_MS);
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            markLaneFailure(lane);
+            console.warn(`[verify:${requestId}] Fast fallback failed ${response.status}: ${lane.model}/key${lane.slot}`);
+            continue;
+          }
+          const data = parseModelJson(responseText(payload));
+          markLaneSuccess(lane);
+          console.info(`[verify:${requestId}] Fast fallback ok (${lane.model}, ${Date.now() - attemptStartedAt}ms)`);
+          return { data, usedModel: lane.model, grounded: false };
+        } catch (error) {
+          markLaneFailure(lane);
+          lastError = error;
+          console.warn(`[verify:${requestId}] Fast fallback error on ${lane.model}/key${lane.slot}: ${error.message}`);
+        }
+      }
+      throw lastError;
+    };
+
     let analysis;
     try {
       analysis = await analyzeOnce();
     } catch (error) {
-      if (error?.status) return errorResponse(error.message, error.status, "AI_FAILED");
-      throw error;
+      try {
+        analysis = await analyzeFastFallback(error);
+      } catch (fallbackError) {
+        if (error?.status) return errorResponse(error.message, error.status, "AI_FAILED");
+        throw fallbackError;
+      }
     }
     setCachedAnalysis(transcriptHash, analysis);
     const result = normalizeResult(analysis.data);
     console.info(`[verify:${requestId}] Complete: ${result.claims.length} claims, ${result.fallacies.length} alerts, ${Date.now() - startedAt}ms`);
-    return NextResponse.json({ ...result, meta: { transcriptCharacters: transcript.length, truncated: transcript.length > TRANSCRIPT_LIMIT, model: analysis.usedModel, cacheHours: 24 } });
+    return NextResponse.json({ ...result, meta: { transcriptCharacters: transcript.length, truncated: transcript.length > TRANSCRIPT_LIMIT, model: analysis.usedModel, grounded: analysis.grounded ?? true, cacheHours: 24 } });
   } catch (error) {
     const timedOut = isTimeout(error);
     console[timedOut ? "warn" : "error"](`[verify:${requestId}] ${timedOut ? "Request timed out" : "Unhandled error"}`, error);

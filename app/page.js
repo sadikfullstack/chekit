@@ -124,7 +124,7 @@ function Results({ result, onReset }) {
       <div className={`verdict-hero tone-${verdict.tone}`}>
         <div className="verdict-glow"/><div className="verdict-glyph">{verdict.glyph}</div>
         <span>THE QUICK READ</span><h1>{verdict.label}</h1><p>{result.summary}</p>
-        <div className="confidence-pill"><b>{result.confidence}%</b> evidence strength <span>·</span> checked live</div>
+        <div className="confidence-pill"><b>{result.confidence}%</b> evidence strength <span>·</span> {result.meta?.grounded === false ? "quick mode" : "checked live"}</div>
       </div>
       <div className="snapshot">
         <div><strong>{counts.TRUE || 0}</strong><span>Checks out</span></div>
@@ -135,7 +135,7 @@ function Results({ result, onReset }) {
         <button className={tab === "facts" ? "active" : ""} onClick={() => { setTab("facts"); setOpenCard(null); }}>Quick facts <span>{result.claims.length}</span></button>
         <button className={tab === "signals" ? "active" : ""} onClick={() => { setTab("signals"); setOpenCard(null); }}>Rhetoric <span>{result.fallacies.length}</span></button>
       </div>
-      <div className="deck-intro"><div><h2>{tab === "facts" ? "What holds up" : "How it persuades"}</h2><p>{tab === "facts" ? "Swipe through. Tap only when you want the receipts." : "Patterns worth noticing—not a judgment of intent."}</p></div><span>SWIPE →</span></div>
+      <div className="deck-intro"><div><h2>{tab === "facts" ? "What holds up" : "How it persuades"}</h2><p>{tab === "facts" ? (result.meta?.grounded === false ? "Fast scan. Live sources were busy, so treat this as a first pass." : "Swipe through. Tap only when you want the receipts.") : "Patterns worth noticing—not a judgment of intent."}</p></div><span>SWIPE →</span></div>
       <div className="card-deck">
         {tab === "facts" && (result.claims.length ? result.claims.map((item, i) => <ClaimCard key={i} item={item} index={i} open={openCard === `f${i}`} onToggle={() => toggle(`f${i}`)}/>) : <div className="empty-card">No concrete claims to check.</div>)}
         {tab === "signals" && (result.fallacies.length ? result.fallacies.map((item, i) => <SignalCard key={i} item={item} open={openCard === `r${i}`} onToggle={() => toggle(`r${i}`)}/>) : <div className="empty-card">No clear persuasion tricks detected.</div>)}
