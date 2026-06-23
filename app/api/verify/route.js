@@ -4,9 +4,10 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const TRANSCRIPT_LIMIT = 16000;
-const TRANSCRIPT_TIMEOUT_MS = 11000;
-const GEMINI_TIMEOUT_MS = 8500;
-const REQUEST_BUDGET_MS = 26000;
+const TRANSCRIPT_TIMEOUT_MS = 18000;
+const GEMINI_TIMEOUT_MS = 32000;
+const REQUEST_BUDGET_MS = 56000;
+const MAX_GEMINI_LANES = 2;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const RATE_LIMIT_MAX = 8;
@@ -587,7 +588,7 @@ export async function POST(request) {
       let lastStatus = 502;
       let lastPayload = {};
       const failures = [];
-      const lanes = geminiLanes();
+      const lanes = geminiLanes().slice(0, MAX_GEMINI_LANES);
       console.info(`[verify:${requestId}] Candidate lanes: ${lanes.map((lane) => `${lane.model}/key${lane.slot}`).join(", ")}`);
       for (let attempt = 0; attempt < lanes.length; attempt += 1) {
         if (Date.now() - startedAt > REQUEST_BUDGET_MS - 3000) {
