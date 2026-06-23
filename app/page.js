@@ -171,7 +171,14 @@ export default function Home() {
     try {
       const response = await fetch("/api/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: normalizedUrl }) });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || "That scan didn't finish. Try once more.");
+      if (!response.ok) {
+        const fallback = response.status === 504
+          ? "That video took too long to check. Try again, or use a shorter clip."
+          : response.status >= 500
+            ? "The check hit a temporary server issue. Try once more."
+            : "That scan didn't finish. Try once more.";
+        throw new Error(data.error || fallback);
+      }
       setResult(data); setStatus("success"); window.scrollTo({ top: 0 });
     } catch (err) { setError(err.message); setStatus("error"); }
   }

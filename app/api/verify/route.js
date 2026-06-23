@@ -5,7 +5,9 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const TRANSCRIPT_LIMIT = 30000;
-const REQUEST_TIMEOUT_MS = 45000;
+const TRANSCRIPT_TIMEOUT_MS = 12000;
+const GEMINI_TIMEOUT_MS = 22000;
+const MAX_GEMINI_ATTEMPTS = 2;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const RATE_LIMIT_MAX = 8;
 const TIKTOK_HOSTS = new Set([
@@ -36,7 +38,7 @@ const responseSchema = {
     confidence: { type: "integer" },
     claims: {
       type: "array",
-      maxItems: 6,
+      maxItems: 4,
       items: {
         type: "object",
         required: ["claim", "verdict", "explanation", "sources", "counterEvidence"],
@@ -67,7 +69,7 @@ const responseSchema = {
     },
     fallacies: {
       type: "array",
-      maxItems: 8,
+      maxItems: 5,
       items: {
         type: "object",
         required: ["name", "quote", "explanation", "severity"],
@@ -93,7 +95,7 @@ Return one valid JSON object only with this exact shape:
 {"summary":"one short sentence","overallVerdict":"RELIABLE|MIXED|UNRELIABLE|UNVERIFIABLE","confidence":85,"claims":[{"claim":"short claim","verdict":"TRUE|FALSE|MISLEADING|UNVERIFIABLE","explanation":"max 2 short sentences, include relevant dates","sources":[{"label":"supporting source","url":"https://..."}],"counterEvidence":[{"label":"counter source","url":"https://..."}]}],"fallacies":[{"name":"fallacy name","quote":"short exact quote","explanation":"brief mechanism and effect","severity":"LOW|MEDIUM|HIGH"}]}
 
 Rules:
-- Extract at most 6 consequential, externally verifiable claims. Ignore opinions and jokes.
+- Extract at most 4 consequential, externally verifiable claims. Ignore opinions and jokes.
 - Do adversarial verification, not phrase matching. For each claim, search both "what evidence would support this?" and "what reliable evidence would falsify, qualify, or debunk this?"
 - Use reliable sources only: primary records, official data, court/government documents, peer-reviewed/academic sources, reputable newsrooms, and established fact-checkers. Do not rely on blogs, forums, unsourced social posts, engagement farms, or search snippets.
 - Do not just search the video's exact wording. Search the underlying entity, event, dates, policy, quote, statistics, and opposing explanations.
@@ -113,7 +115,14 @@ Rules:
 const combinedPrompt = `${researchPrompt}\n\nAlso perform this independent rhetoric pass:\n${rhetoricPrompt}\nReturn both claims and fallacies in the single JSON object described above.`;
 
 function errorResponse(message, status = 500, code = "INTERNAL_ERROR", headers = {}) {
-  return NextResponse.json({ error: message, code }, { status, headers });
+  return NextResponse.json(
+    { error: message, code },
+    { status, headers: { "Cache-Control": "no-store", ...headers } }
+  );
+}
+
+function isTimeout(error) {
+  return error?.name === "TimeoutError" || error?.name === "AbortError";
 }
 
 function clientAddress(request) {
@@ -196,6 +205,11 @@ function coolDownGeminiLane(lane, response) {
       || ([400, 404].includes(response.status) ? 60 * 60 * 1000 : response.status === 429 ? 15 * 60 * 1000 : 30 * 1000);
     router.cooldowns.set(lane.id, Date.now() + duration);
   }
+}
+
+function coolDownGeminiLaneAfterError(lane, error) {
+  const router = globalThis.__chekitGeminiRouter;
+  router.cooldowns.set(lane.id, Date.now() + (isTimeout(error) ? 2 * 60 * 1000 : 30 * 1000));
 }
 
 function getTikTokUrl(value) {
@@ -310,6 +324,7 @@ function parseModelJson(text) {
 }
 
 export async function POST(request) {
+  const startedAt = Date.now();
   const requestId = crypto.randomUUID().slice(0, 8);
   console.info(`[verify:${requestId}] Request received`);
 
@@ -355,7 +370,7 @@ export async function POST(request) {
     const transcriptResponse = await fetch(transcriptEndpoint, {
       headers: { "x-api-key": supadataKey, Accept: "application/json" },
       cache: "no-store",
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(TRANSCRIPT_TIMEOUT_MS),
     });
     const transcriptPayload = await transcriptResponse.json().catch(() => ({}));
     if (!transcriptResponse.ok) {
@@ -373,7 +388,7 @@ export async function POST(request) {
       return errorResponse("No spoken captions were found for this video.", 422, "NO_TRANSCRIPT");
     }
     const clippedTranscript = transcript.slice(0, TRANSCRIPT_LIMIT);
-    console.info(`[verify:${requestId}] Transcript ready (${transcript.length} chars)`);
+    console.info(`[verify:${requestId}] Transcript ready (${transcript.length} chars, ${Date.now() - startedAt}ms)`);
 
     const videoContext = {
       currentDate: new Date().toISOString(),
@@ -392,7 +407,7 @@ export async function POST(request) {
       headers: { "x-goog-api-key": lane.key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
       cache: "no-store",
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
     });
 
     const analysisRequest = (modelName, includeSearch = true) => ({
@@ -413,26 +428,49 @@ export async function POST(request) {
       const excluded = new Set();
       let lastStatus = 502;
       let lastPayload = {};
-      for (let attempt = 0; attempt < 3; attempt += 1) {
+      for (let attempt = 0; attempt < MAX_GEMINI_ATTEMPTS; attempt += 1) {
         const lane = nextGeminiLane(excluded);
         if (!lane) break;
         excluded.add(lane.id);
+        const attemptStartedAt = Date.now();
         console.info(`[verify:${requestId}] Attempt ${attempt + 1}: ${lane.model}, key slot ${lane.slot}/${lane.totalKeys}`);
-        const response = await makeGeminiRequest(analysisRequest(lane.model, true), lane);
-        const payload = await response.json().catch(() => ({}));
-        if (response.ok) {
-          return { data: parseModelJson(responseText(payload)), usedModel: lane.model };
+        try {
+          const response = await makeGeminiRequest(analysisRequest(lane.model, true), lane);
+          const payload = await response.json().catch(() => ({}));
+          if (response.ok) {
+            try {
+              console.info(`[verify:${requestId}] Gemini ok (${lane.model}, ${Date.now() - attemptStartedAt}ms)`);
+              return { data: parseModelJson(responseText(payload)), usedModel: lane.model };
+            } catch (parseError) {
+              lastStatus = 502;
+              lastPayload = { error: { message: parseError.message } };
+              coolDownGeminiLaneAfterError(lane, parseError);
+              console.warn(`[verify:${requestId}] Invalid Gemini JSON from ${lane.model}; trying another lane`);
+              continue;
+            }
+          }
+          lastStatus = response.status;
+          lastPayload = payload;
+          coolDownGeminiLane(lane, response);
+          console.warn(`[verify:${requestId}] Lane cooled after ${response.status}: ${lane.model}, key slot ${lane.slot}, ${Date.now() - attemptStartedAt}ms`);
+        } catch (error) {
+          lastStatus = isTimeout(error) ? 504 : 502;
+          lastPayload = { error: { message: error.message } };
+          coolDownGeminiLaneAfterError(lane, error);
+          console.warn(`[verify:${requestId}] Gemini lane error on ${lane.model} after ${Date.now() - attemptStartedAt}ms: ${error.message}`);
         }
-        lastStatus = response.status;
-        lastPayload = payload;
-        coolDownGeminiLane(lane, response);
-        console.warn(`[verify:${requestId}] Lane cooled after ${response.status}: ${lane.model}, key slot ${lane.slot}`);
       }
       console.error(`[verify:${requestId}] Gemini pool exhausted`, lastPayload?.error);
-      const error = new Error(lastStatus === 429 ? "AI capacity is busy. Please try again shortly." : "The AI analysis could not be completed.");
-      error.status = lastStatus === 429 ? 429 : 502;
+      const error = new Error(
+        lastStatus === 429
+          ? "AI capacity is busy. Please try again shortly."
+          : lastStatus === 504
+            ? "The fact-check took too long. Try a shorter video or scan again."
+            : "The AI analysis could not be completed cleanly. Please try again."
+      );
+      error.status = lastStatus === 429 ? 429 : lastStatus === 504 ? 504 : 502;
       throw error;
-    }, ["chekit-analysis-v7", transcriptHash], { revalidate: 86400 });
+    }, ["chekit-analysis-v8", transcriptHash], { revalidate: 86400 });
 
     let analysis;
     try {
@@ -442,10 +480,10 @@ export async function POST(request) {
       throw error;
     }
     const result = normalizeResult(analysis.data);
-    console.info(`[verify:${requestId}] Complete: ${result.claims.length} claims, ${result.fallacies.length} alerts`);
+    console.info(`[verify:${requestId}] Complete: ${result.claims.length} claims, ${result.fallacies.length} alerts, ${Date.now() - startedAt}ms`);
     return NextResponse.json({ ...result, meta: { transcriptCharacters: transcript.length, truncated: transcript.length > TRANSCRIPT_LIMIT, model: analysis.usedModel, cacheHours: 24 } });
   } catch (error) {
-    const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
+    const timedOut = isTimeout(error);
     console.error(`[verify:${requestId}] Unhandled error`, error);
     return errorResponse(
       timedOut ? "The analysis timed out. Please try again." : "Something went wrong while analyzing the video.",
