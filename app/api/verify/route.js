@@ -4,7 +4,7 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const TRANSCRIPT_LIMIT = 16000;
-const TRANSCRIPT_TIMEOUT_MS = 7000;
+const TRANSCRIPT_TIMEOUT_MS = 11000;
 const GEMINI_TIMEOUT_MS = 8500;
 const REQUEST_BUDGET_MS = 26000;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -461,11 +461,25 @@ export async function POST(request) {
     transcriptEndpoint.searchParams.set("text", "true");
 
     console.info(`[verify:${requestId}] Fetching transcript`);
-    const transcriptResponse = await fetch(transcriptEndpoint, {
-      headers: { "x-api-key": supadataKey, Accept: "application/json" },
-      cache: "no-store",
-      signal: AbortSignal.timeout(TRANSCRIPT_TIMEOUT_MS),
-    });
+    let transcriptResponse;
+    try {
+      transcriptResponse = await fetch(transcriptEndpoint, {
+        headers: { "x-api-key": supadataKey, Accept: "application/json" },
+        cache: "no-store",
+        signal: AbortSignal.timeout(TRANSCRIPT_TIMEOUT_MS),
+      });
+    } catch (error) {
+      if (isTimeout(error)) {
+        console.warn(`[verify:${requestId}] Transcript timed out after ${TRANSCRIPT_TIMEOUT_MS}ms`);
+        return errorResponse(
+          "Transcript extraction took too long. Try again, or use a shorter TikTok.",
+          504,
+          "TRANSCRIPT_TIMEOUT"
+        );
+      }
+      console.error(`[verify:${requestId}] Transcript network error`, error);
+      return errorResponse("Could not reach the transcript service.", 502, "TRANSCRIPT_NETWORK_ERROR");
+    }
     const transcriptPayload = await transcriptResponse.json().catch(() => ({}));
     if (!transcriptResponse.ok) {
       console.error(`[verify:${requestId}] Transcript API ${transcriptResponse.status}`, transcriptPayload);
@@ -599,7 +613,7 @@ export async function POST(request) {
     return NextResponse.json({ ...result, meta: { transcriptCharacters: transcript.length, truncated: transcript.length > TRANSCRIPT_LIMIT, model: analysis.usedModel, cacheHours: 24 } });
   } catch (error) {
     const timedOut = isTimeout(error);
-    console.error(`[verify:${requestId}] Unhandled error`, error);
+    console[timedOut ? "warn" : "error"](`[verify:${requestId}] ${timedOut ? "Request timed out" : "Unhandled error"}`, error);
     return errorResponse(
       timedOut ? "The analysis timed out. Please try again." : "Something went wrong while analyzing the video.",
       timedOut ? 504 : 500,
